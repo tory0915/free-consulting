@@ -28,6 +28,9 @@ const INITIAL_DATA = {
             el2: { cur: 0, tot: 100, name: '탐구2' }
         }
     },
+    targetAnalysis: {
+        univ: '', dept: '', status: 'none', reqKor: 0, reqMath: 0, reqEl: 0
+    },
     exams: [], studies: [], advices: []
 };
 
@@ -44,9 +47,14 @@ const Store = {
         if(docSnap.exists()) {
             Store.data = docSnap.data();
             if(!Store.data.advices) Store.data.advices = [];
+            if(!Store.data.targetAnalysis) Store.data.targetAnalysis = { univ: '', dept: '', status: 'none', reqKor: 0, reqMath: 0, reqEl: 0 };
         } else {
             Store.data = INITIAL_DATA;
-            await setDoc(docRef, Store.data);
+            try {
+                await setDoc(docRef, Store.data);
+            } catch(err) {
+                console.warn("초기 데이터 생성 지연 (GCP 동기화 중):", err.message);
+            }
         }
         Dashboard.refresh();
         App.populateForms();
@@ -54,7 +62,15 @@ const Store = {
     getData: () => Store.data || INITIAL_DATA,
     saveData: async (newData) => {
         Store.data = newData;
-        if(Store.uid) await setDoc(doc(db, "users", Store.uid), newData);
+        if(Store.uid) {
+            try {
+                await setDoc(doc(db, "users", Store.uid), newData);
+            } catch (err) {
+                console.error(err);
+                alert("구글 클라우드 서버 동기화 지연으로 저장이 일시적으로 차단되었습니다. 최대 10~30분 뒤 새로고침 후 다시 시도해주세요!\n사유: " + err.message);
+                return;
+            }
+        }
         Dashboard.refresh();
     }
 }
@@ -101,9 +117,15 @@ const AdminModule = {
             if(data.profile && data.profile.role === 'admin') return; // Hide admins from list
             
             const p = data.profile || {};
+            const tAnalysis = data.targetAnalysis || {};
             const lastStudy = data.studies && data.studies.length > 0 
                 ? data.studies[data.studies.length-1].date 
                 : '<span style="color:var(--text-muted)">기록 없음</span>';
+            
+            // Pending request badge
+            const pendingBadge = tAnalysis.status === 'waiting' 
+                ? `<span style="display:inline-block; margin-right:8px; padding:3px 8px; font-size:0.75rem; background:#fee2e2; color:#ef4444; border-radius:12px; font-weight:700; animation:pulse-slow 2s infinite;">🔥 성적분석 요청</span>` 
+                : '';
             
             const tr = document.createElement('tr');
             tr.innerHTML = `
@@ -112,6 +134,7 @@ const AdminModule = {
                 <td>${p.consultant || '-'}</td>
                 <td style="font-family:'JetBrains Mono';">${lastStudy}</td>
                 <td style="text-align:right;">
+                    ${pendingBadge}
                     <button class="btn-primary" style="margin:0; padding:6px 12px; font-size:0.8rem; width:auto; display:inline-block;">대시보드 접속</button>
                 </td>
             `;
@@ -299,6 +322,31 @@ const App = {
             inputEl.value = '';
             alert('학생 대시보드에 피드백 코멘트가 성공적으로 등록되었습니다!');
         });
+
+        // Target University Analysis Request (Student)
+        document.getElementById('targetUnivForm')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const data = Store.getData();
+            if(!data.targetAnalysis) data.targetAnalysis = { status: 'none', reqKor: 0, reqMath: 0, reqEl: 0 };
+            data.targetAnalysis.univ = document.getElementById('stuHopeUniv').value;
+            data.targetAnalysis.dept = document.getElementById('stuHopeDept').value;
+            data.targetAnalysis.status = 'waiting';
+            await Store.saveData(data);
+            alert('프레르 프리즘 분석 요청이 전송되었습니다!');
+        });
+
+        // Target University Analysis Feedback (Admin)
+        document.getElementById('targetAdminForm')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const data = Store.getData();
+            if(!data.targetAnalysis) data.targetAnalysis = { status: 'none' };
+            data.targetAnalysis.reqKor = parseInt(document.getElementById('admReqKor').value) || 0;
+            data.targetAnalysis.reqMath = parseInt(document.getElementById('admReqMath').value) || 0;
+            data.targetAnalysis.reqEl = parseInt(document.getElementById('admReqEl').value) || 0;
+            data.targetAnalysis.status = 'completed';
+            await Store.saveData(data);
+            alert('학생에게 목표 백분위 피드백이 전송되었습니다.');
+        });
     },
 
     updateDateDisplay: () => {
@@ -323,6 +371,51 @@ const Dashboard = {
         } else {
             document.getElementById('profileAdminLabel').style.display = 'none';
             document.getElementById('adminAdvicePanel').style.display = 'none';
+        }
+
+        // Target Analysis View Update
+        const tAnalysis = data.targetAnalysis || { status: 'none', univ: '', dept: '' };
+        const targetStuForm = document.getElementById('targetStudentPanel');
+        const targetLoading = document.getElementById('targetLoadingPanel');
+        const targetResult = document.getElementById('targetResultPanel');
+        const targetAdmForm = document.getElementById('targetAdminPanel');
+        
+        if (targetStuForm) {
+            document.getElementById('stuHopeUniv').value = tAnalysis.univ || '';
+            document.getElementById('stuHopeDept').value = tAnalysis.dept || '';
+            
+            if (tAnalysis.status === 'none') {
+                targetLoading.style.display = 'none';
+                targetResult.style.display = 'none';
+            } else if (tAnalysis.status === 'waiting') {
+                targetLoading.style.display = (isAdmin && Store.uid !== currentUserUid) ? 'none' : 'block';
+                targetResult.style.display = 'none';
+            } else if (tAnalysis.status === 'completed') {
+                targetLoading.style.display = 'none';
+                targetResult.style.display = 'block';
+                document.getElementById('resReqKor').innerText = `${tAnalysis.reqKor}%`;
+                document.getElementById('resReqMath').innerText = `${tAnalysis.reqMath}%`;
+                document.getElementById('resReqEl').innerText = `${tAnalysis.reqEl}%`;
+            }
+
+            if (isAdmin && Store.uid !== currentUserUid) {
+                if (tAnalysis.status === 'waiting' || tAnalysis.status === 'completed') {
+                    targetAdmForm.style.display = 'block';
+                    if(tAnalysis.status === 'completed') {
+                        document.getElementById('admReqKor').value = tAnalysis.reqKor;
+                        document.getElementById('admReqMath').value = tAnalysis.reqMath;
+                        document.getElementById('admReqEl').value = tAnalysis.reqEl;
+                    } else {
+                        document.getElementById('admReqKor').value = '';
+                        document.getElementById('admReqMath').value = '';
+                        document.getElementById('admReqEl').value = '';
+                    }
+                } else {
+                    targetAdmForm.style.display = 'none';
+                }
+            } else {
+                targetAdmForm.style.display = 'none';
+            }
         }
 
         // Render Accumulated Advices / Feedbacks
